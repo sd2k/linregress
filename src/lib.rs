@@ -609,6 +609,12 @@ impl RegressionModel {
         &self.regressor_names
     }
 
+    /// The t-statistics of the parameters.
+    #[inline]
+    pub fn t_values(&self) -> &[f64] {
+        self.model.t_values()
+    }
+
     /// The two-tailed p-values for the t-statistics of the parameters
     #[inline]
     pub fn p_values(&self) -> &[f64] {
@@ -895,6 +901,8 @@ pub struct LowLevelRegressionModel {
     ///  Note that the square root of `scale` is often
     ///  called the standard error of the regression.
     scale: f64,
+    /// The t-statistics of the params.
+    tvalues: Vec<f64>,
 }
 
 impl LowLevelRegressionModel {
@@ -925,8 +933,13 @@ impl LowLevelRegressionModel {
         let centered_tss = centered_input_matrix.dot(&centered_input_matrix);
         let rsquared = 1. - (ssr / centered_tss);
         let rsquared_adj = 1. - ((n - 1) as f64 / df_resid as f64 * (1. - rsquared));
-        let tvalues = parameters.iter().zip(se.iter()).map(|(x, y)| x / y);
+        let tvalues: Vec<_> = parameters
+            .iter()
+            .zip(se.iter())
+            .map(|(x, y)| x / y)
+            .collect();
         let pvalues: Vec<f64> = tvalues
+            .iter()
             .map(|x| students_t_cdf(x.abs().neg(), df_resid as i64).map(|i| i * 2.))
             .collect::<Option<_>>()
             .ok_or_else(|| {
@@ -947,6 +960,7 @@ impl LowLevelRegressionModel {
             pvalues,
             residuals,
             scale,
+            tvalues,
         })
     }
 
@@ -954,6 +968,12 @@ impl LowLevelRegressionModel {
     #[inline]
     pub fn p_values(&self) -> &[f64] {
         &self.pvalues
+    }
+
+    /// The t-statistics of the parameters.
+    #[inline]
+    pub fn t_values(&self) -> &[f64] {
+        &self.tvalues
     }
 
     /// The residuals of the model
