@@ -423,3 +423,58 @@ fn test_multiple_predictions_out_of_order() {
     assert_almost_eq!(prediction[0], 3.500000000000111, 1.0E-7);
     assert_almost_eq!(prediction[1], 2.5000000000001337, 1.0E-7);
 }
+
+#[test]
+fn test_prediction_no_intercept() {
+    let y = vec![1., 2., 3., 4., 5.];
+    let x1 = vec![5., 4., 3., 2., 1.];
+    let x2 = vec![729.53, 439.0367, 42.054, 1., 0.];
+    let x3 = vec![258.589, 616.297, 215.061, 498.361, 0.];
+    let data = vec![("Y", y), ("X1", x1), ("X2", x2), ("X3", x3)];
+    let data = RegressionDataBuilder::new().build_from(data).unwrap();
+    let formula = "Y ~ X1 + X2 + X3";
+    let model = FormulaRegressionBuilder::new()
+        .data(&data)
+        .include_intercept(false)
+        .formula(formula)
+        .fit()
+        .unwrap();
+
+    let new_data = vec![
+        ("X1", vec![2.5, 3.5]),
+        ("X3", vec![2.0, 1.0]),
+        ("X2", vec![2.0, 8.0]),
+    ];
+    assert_eq!(model.parameters().len(), new_data.len());
+    let prediction = model.predict(new_data).unwrap();
+    assert_eq!(prediction.len(), 2);
+    assert_almost_eq!(prediction[0], 4.36914393, 1.0E-7);
+    assert_almost_eq!(prediction[1], 6.06215651, 1.0E-7);
+}
+
+#[test]
+fn test_prediction_no_intercept_formula() {
+    let y = vec![1., 2., 3., 4., 5.];
+    let x1 = vec![5., 4., 3., 2., 1.];
+    let x2 = vec![729.53, 439.0367, 42.054, 1., 0.];
+    let x3 = vec![258.589, 616.297, 215.061, 498.361, 0.];
+    let data = vec![("Y", y), ("X1", x1), ("X2", x2), ("X3", x3)];
+    let data = RegressionDataBuilder::new().build_from(data).unwrap();
+    let formula = "Y ~ X1 + X2 + X3 - 1";
+    let model = FormulaRegressionBuilder::new()
+        .data(&data)
+        .formula(formula)
+        .fit()
+        .unwrap();
+
+    let new_data = vec![
+        ("X1", vec![2.5, 3.5]),
+        ("X3", vec![2.0, 1.0]),
+        ("X2", vec![2.0, 8.0]),
+    ];
+    assert_eq!(model.parameters().len(), new_data.len());
+    let prediction = model.predict(new_data).unwrap();
+    assert_eq!(prediction.len(), 2);
+    assert_almost_eq!(prediction[0], 4.36914393, 1.0E-7);
+    assert_almost_eq!(prediction[1], 6.06215651, 1.0E-7);
+}
