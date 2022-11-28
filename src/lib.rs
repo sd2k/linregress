@@ -153,6 +153,8 @@ fn ulps_eq(a: f64, b: f64, epsilon: f64, max_ulps: u32) -> bool {
     a.abs_diff(b) <= max_ulps as u64
 }
 
+type DataColumns<'a> = (Cow<'a, str>, Vec<Cow<'a, str>>, bool);
+
 /// A builder to create and fit a linear regression model.
 ///
 /// Given a dataset and a set of columns to use this builder
@@ -191,6 +193,7 @@ pub struct FormulaRegressionBuilder<'a> {
     data: Option<&'a RegressionData<'a>>,
     formula: Option<Cow<'a, str>>,
     columns: Option<(Cow<'a, str>, Vec<Cow<'a, str>>)>,
+    include_intercept: usize,
 }
 
 impl<'a> Default for FormulaRegressionBuilder<'a> {
@@ -206,6 +209,7 @@ impl<'a> FormulaRegressionBuilder<'a> {
             data: None,
             formula: None,
             columns: None,
+            include_intercept: 1,
         }
     }
 
@@ -257,6 +261,11 @@ impl<'a> FormulaRegressionBuilder<'a> {
         self
     }
 
+    pub fn include_intercept(mut self, include_intercept: bool) -> Self {
+        self.include_intercept = include_intercept.into();
+        self
+    }
+
     /// Fits the model and returns a [`RegressionModel`] if successful.
     /// You need to set the data with [`data`] and a formula with [`formula`]
     /// before you can use it.
@@ -265,9 +274,14 @@ impl<'a> FormulaRegressionBuilder<'a> {
     /// [`data`]: struct.FormulaRegressionBuilder.html#method.data
     /// [`formula`]: struct.FormulaRegressionBuilder.html#method.formula
     pub fn fit(self) -> Result<RegressionModel, Error> {
-        let FittingData(input_vector, output_matrix, outputs) =
+        let FittingData(input_vector, output_matrix, outputs, include_intercept) =
             Self::get_matrices_and_regressor_names(self)?;
-        RegressionModel::try_from_matrices_and_regressor_names(input_vector, output_matrix, outputs)
+        RegressionModel::try_from_matrices_and_regressor_names(
+            input_vector,
+            output_matrix,
+            outputs,
+            include_intercept,
+        )
     }
 
     /// Like [`fit`] but does not perfom any statistics on the resulting model.
@@ -280,7 +294,7 @@ impl<'a> FormulaRegressionBuilder<'a> {
     ///
     /// [`fit`]: struct.FormulaRegressionBuilder.html#method.fit
     pub fn fit_without_statistics(self) -> Result<Vec<f64>, Error> {
-        let FittingData(input_vector, output_matrix, _output_names) =
+        let FittingData(input_vector, output_matrix, _output_names, _) =
             Self::get_matrices_and_regressor_names(self)?;
         let low_level_result = fit_ols_pinv(input_vector, output_matrix)?;
         let parameters = low_level_result.params;
@@ -288,16 +302,19 @@ impl<'a> FormulaRegressionBuilder<'a> {
     }
 
     fn get_matrices_and_regressor_names(self) -> Result<FittingData, Error> {
-        let (input, outputs) = self.get_data_columns()?;
+        let (input, outputs, mut exclude_intercept) = self.get_data_columns()?;
+        exclude_intercept |= self.include_intercept == 0;
         let data = &self.data.ok_or(Error::NoData)?.data;
         let input_vector: Vec<f64> = data
             .get(&input)
             .cloned()
             .ok_or_else(|| Error::ColumnNotInData(input.into()))?;
         let mut output_matrix = Vec::new();
-        // Add column of all ones as the first column of the matrix
-        let all_ones_column = iter::repeat(1.).take(input_vector.len());
-        output_matrix.extend(all_ones_column);
+        if !exclude_intercept {
+            // Add column of all ones as the first column of the matrix
+            let all_ones_column = iter::repeat(1.).take(input_vector.len());
+            output_matrix.extend(all_ones_column);
+        }
         // Add each input as a new column of the matrix
         for output in &outputs {
             let output_vec = data
@@ -309,41 +326,61 @@ impl<'a> FormulaRegressionBuilder<'a> {
             );
             output_matrix.extend(output_vec.iter());
         }
-        let output_matrix = DMatrix::from_vec(input_vector.len(), outputs.len() + 1, output_matrix);
+        let include_intercept: usize = (!exclude_intercept).into();
+        let output_matrix = DMatrix::from_vec(
+            input_vector.len(),
+            outputs.len() + include_intercept,
+            output_matrix,
+        );
         let outputs: Vec<_> = outputs.iter().map(|x| x.to_string()).collect();
-        Ok(FittingData(input_vector, output_matrix, outputs))
+        Ok(FittingData(
+            input_vector,
+            output_matrix,
+            outputs,
+            include_intercept,
+        ))
     }
 
-    fn get_data_columns(&self) -> Result<(Cow<'_, str>, Vec<Cow<'_, str>>), Error> {
+    fn get_data_columns(&self) -> Result<DataColumns, Error> {
         match (self.formula.as_ref(), self.columns.as_ref()) {
             (Some(..), Some(..)) => Err(Error::BothFormulaAndDataColumnsGiven),
             (Some(formula), None) => Self::parse_formula(formula),
             (None, Some((regressand, regressors))) => {
                 ensure!(!regressors.is_empty(), Error::InvalidDataColumns);
-                Ok((regressand.clone(), regressors.clone()))
+                Ok((
+                    regressand.clone(),
+                    regressors.clone(),
+                    self.include_intercept == 0,
+                ))
             }
             (None, None) => Err(Error::NoFormula),
         }
     }
 
-    fn parse_formula(formula: &str) -> Result<(Cow<'_, str>, Vec<Cow<'_, str>>), Error> {
+    fn parse_formula(formula: &str) -> Result<DataColumns, Error> {
         let split_formula: Vec<_> = formula.split('~').collect();
         ensure!(split_formula.len() == 2, Error::InvalidFormula);
         let input = split_formula[0].trim();
-        let outputs: Vec<_> = split_formula[1]
+        let output: Vec<_> = split_formula[1]
+            .split('-')
+            .map(str::trim)
+            .filter(|x| !x.is_empty())
+            .collect();
+        let exclude_intercept = output.len() == 2 && output[1] == "1";
+        let outputs: Vec<_> = output[0]
             .split('+')
             .map(str::trim)
             .filter(|x| !x.is_empty())
             .map(|i| i.into())
             .collect();
         ensure!(!outputs.is_empty(), Error::InvalidFormula);
-        Ok((input.into(), outputs))
+        Ok((input.into(), outputs, exclude_intercept))
     }
 }
 
 /// A simple tuple struct to reduce the type complxity of the
 /// return type of get_matrices_and_regressor_names.
-struct FittingData(Vec<f64>, DMatrix<f64>, Vec<String>);
+struct FittingData(Vec<f64>, DMatrix<f64>, Vec<String>, usize);
 
 /// A container struct for the regression data.
 ///
@@ -600,6 +637,7 @@ impl Default for InvalidValueHandling {
 pub struct RegressionModel {
     regressor_names: Vec<String>,
     model: LowLevelRegressionModel,
+    include_intercept: usize,
 }
 
 impl RegressionModel {
@@ -644,7 +682,7 @@ impl RegressionModel {
     pub fn iter_p_value_pairs(&self) -> impl Iterator<Item = (&str, f64)> + '_ {
         self.regressor_names
             .iter()
-            .zip(self.model.p_values().iter().skip(1))
+            .zip(self.model.p_values().iter().skip(self.include_intercept))
             .map(|(r, &v)| (r.as_str(), v))
     }
 
@@ -689,7 +727,7 @@ impl RegressionModel {
     pub fn iter_parameter_pairs(&self) -> impl Iterator<Item = (&str, f64)> + '_ {
         self.regressor_names
             .iter()
-            .zip(self.model.parameters().iter().skip(1))
+            .zip(self.model.parameters().iter().skip(self.include_intercept))
             .map(|(r, &v)| (r.as_str(), v))
     }
 
@@ -728,7 +766,7 @@ impl RegressionModel {
     pub fn iter_se_pairs(&self) -> impl Iterator<Item = (&str, f64)> + '_ {
         self.regressor_names
             .iter()
-            .zip(self.model.se().iter().skip(1))
+            .zip(self.model.se().iter().skip(self.include_intercept))
             .map(|(r, &v)| (r.as_str(), v))
     }
 
@@ -813,17 +851,24 @@ impl RegressionModel {
             new_data_values.extend_from_slice(new_data[&Cow::from(key)].as_slice());
         }
 
-        let num_regressors = self.model.parameters.len() - 1;
+        let num_regressors = self.model.parameters.len() - self.include_intercept;
         let new_data_matrix = DMatrix::from_vec(input_len, num_regressors, new_data_values);
         let param_matrix = DMatrix::from_iterator(
             num_regressors,
             1,
-            self.model.parameters.iter().skip(1).copied(),
+            self.model
+                .parameters
+                .iter()
+                .skip(self.include_intercept)
+                .copied(),
         );
-        let intercept = self.model.parameters[0];
-        let intercept_matrix =
-            DMatrix::from_iterator(input_len, 1, std::iter::repeat(intercept).take(input_len));
-        let predictions = (new_data_matrix * param_matrix) + intercept_matrix;
+        let mut predictions = new_data_matrix * param_matrix;
+        if self.include_intercept == 1 {
+            let intercept = self.model.parameters[0];
+            let intercept_matrix =
+                DMatrix::from_iterator(input_len, 1, std::iter::repeat(intercept).take(input_len));
+            predictions += intercept_matrix;
+        }
         let predictions: Vec<f64> = predictions.into_iter().copied().collect();
         Ok(predictions)
     }
@@ -854,11 +899,12 @@ impl RegressionModel {
         inputs: Vec<f64>,
         outputs: DMatrix<f64>,
         output_names: I,
+        include_intercept: usize,
     ) -> Result<Self, Error> {
         let low_level_result = fit_ols_pinv(inputs, outputs)?;
         let model = LowLevelRegressionModel::from_low_level_regression(low_level_result)?;
         let regressor_names: Vec<String> = output_names.into_iter().collect();
-        let num_slopes = model.parameters.len() - 1;
+        let num_slopes = model.parameters.len() - include_intercept;
         ensure!(
             regressor_names.len() == num_slopes,
             Error::InconsistentSlopes(InconsistentSlopes::new(regressor_names.len(), num_slopes))
@@ -866,6 +912,7 @@ impl RegressionModel {
         Ok(Self {
             regressor_names,
             model,
+            include_intercept,
         })
     }
 }
